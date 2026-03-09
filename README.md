@@ -35,15 +35,3 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000).
 
-## Manual MVP Test Cases
-
-- Clear cover with known release + asking price
-- Blurry or angled cover
-- Missing asking price
-- Unknown release (should show fallback guidance)
-- Repeated rapid submits (rate limit behavior)
-
-## Notes
-
-- API route is `POST /api/analyze` (multipart form: `image`, optional `price`, optional `condition`).
-- This app is for informational use only and is not financial advice.
