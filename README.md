@@ -1,36 +1,49 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Should I Buy This Vinyl? (MVP)
 
-## Getting Started
+Minimal single-user web app that:
 
-First, run the development server:
+1. Accepts a vinyl cover image (+ optional asking price and condition)
+2. Extracts likely release hints with vision
+3. Pulls Discogs market context
+4. Generates a structured LLM recommendation (`buy`, `consider`, `skip`)
+
+## Setup
+
+1. Copy env template:
+
+```bash
+cp .env.example .env.local
+```
+
+2. Fill in keys in `.env.local`:
+
+- `DISCOGS_KEY`
+- `DISCOGS_SECRET`
+- `LLM_API_KEY`
+
+Optional:
+
+- `LLM_BASE_URL` (defaults to `https://api.openai.com/v1`)
+- `LLM_MODEL` (defaults to `gpt-4o-mini`)
+- `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` for Spotify pre-listen embeds
+
+3. Run app:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Manual MVP Test Cases
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- Clear cover with known release + asking price
+- Blurry or angled cover
+- Missing asking price
+- Unknown release (should show fallback guidance)
+- Repeated rapid submits (rate limit behavior)
 
-## Learn More
+## Notes
 
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- API route is `POST /api/analyze` (multipart form: `image`, optional `price`, optional `condition`).
+- This app is for informational use only and is not financial advice.
