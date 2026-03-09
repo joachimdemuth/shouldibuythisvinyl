@@ -89,6 +89,20 @@ export interface EvaluationOutput {
   risks: string[];
 }
 
+export interface SpotifyPreview {
+  type: "track" | "album";
+  name: string;
+  artist: string;
+  openUrl: string;
+  embedUrl: string;
+}
+
+export interface IdentifyResult {
+  vision: VisionHints;
+  discogs: DiscogsContext;
+  spotify?: SpotifyPreview;
+}
+
 export interface AnalyzeResult {
   input: {
     askingPrice?: number;
@@ -98,12 +112,6 @@ export interface AnalyzeResult {
   };
   vision: VisionHints;
   discogs: DiscogsContext;
-  spotify?: {
-    type: "track" | "album";
-    name: string;
-    artist: string;
-    openUrl: string;
-    embedUrl: string;
-  };
+  spotify?: SpotifyPreview;
   evaluation: EvaluationOutput;
 }

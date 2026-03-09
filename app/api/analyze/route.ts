@@ -7,6 +7,7 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { fetchSpotifyPreview } from "@/lib/spotify";
 import {
   CONDITIONS,
+  IdentifyResult,
   RecordCondition,
   SUPPORTED_CURRENCIES,
   SupportedCurrency,
@@ -51,6 +52,17 @@ function parseOptionalLlmApiKey(value?: string): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
+function parseOptionalIdentified(value?: string): IdentifyResult | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = JSON.parse(value) as IdentifyResult;
+    if (!parsed?.discogs?.release) return undefined;
+    return parsed;
+  } catch {
+    throw new Error("Invalid identified album payload.");
+  }
+}
+
 export async function POST(request: NextRequest) {
   try {
     if (process.env.ANALYZE_DISABLED?.trim() === "true") {
@@ -80,28 +92,12 @@ export async function POST(request: NextRequest) {
     const env = getEnvConfig();
     const formData = await request.formData();
 
-    const image = formData.get("image");
-    if (!(image instanceof File)) {
-      return NextResponse.json({ error: "Image is required." }, { status: 400 });
-    }
-    if (!image.type.startsWith("image/")) {
-      return NextResponse.json(
-        { error: "Uploaded file must be an image." },
-        { status: 400 },
-      );
-    }
-    if (image.size > MAX_FILE_BYTES) {
-      return NextResponse.json(
-        { error: "Image is too large. Max size is 8MB." },
-        { status: 400 },
-      );
-    }
-
     const priceRaw = formData.get("price");
     const conditionRaw = formData.get("condition");
     const barcodeRaw = formData.get("barcode");
     const currencyRaw = formData.get("currency");
     const llmApiKeyRaw = formData.get("llmApiKey");
+    const identifiedRaw = formData.get("identified");
     const price = parseOptionalPrice(
       typeof priceRaw === "string" ? priceRaw : undefined,
     );
@@ -113,6 +109,9 @@ export async function POST(request: NextRequest) {
     );
     const llmApiKey = parseOptionalLlmApiKey(
       typeof llmApiKeyRaw === "string" ? llmApiKeyRaw : undefined,
+    );
+    const identified = parseOptionalIdentified(
+      typeof identifiedRaw === "string" ? identifiedRaw : undefined,
     );
     const effectiveLlmApiKey = llmApiKey ?? env.llmApiKey;
     if (!effectiveLlmApiKey) {
@@ -132,74 +131,113 @@ export async function POST(request: NextRequest) {
       ? conditionValue
       : undefined;
 
-    const imageBuffer = new Uint8Array(await image.arrayBuffer());
-    console.info("[analyze] Request received", {
-      hasPrice: typeof price === "number",
-      hasCondition: Boolean(condition),
-      hasBarcode: Boolean(barcode),
-      hasRequestLlmKey: Boolean(llmApiKey),
-      currency,
-      imageSize: image.size,
-      imageType: image.type,
-    });
+    let vision = identified?.vision;
+    let rawDiscogs = identified?.discogs;
+    let spotify = identified?.spotify;
 
-    const vision = await extractReleaseHintsFromImage({
-      imageBytes: imageBuffer,
-      mimeType: image.type,
-      llmApiKey: effectiveLlmApiKey,
-      llmBaseUrl: env.llmBaseUrl,
-      llmModel: env.llmModel,
-    });
+    if (!vision || !rawDiscogs) {
+      const image = formData.get("image");
+      if (!(image instanceof File)) {
+        return NextResponse.json({ error: "Image is required." }, { status: 400 });
+      }
+      if (!image.type.startsWith("image/")) {
+        return NextResponse.json(
+          { error: "Uploaded file must be an image." },
+          { status: 400 },
+        );
+      }
+      if (image.size > MAX_FILE_BYTES) {
+        return NextResponse.json(
+          { error: "Image is too large. Max size is 8MB." },
+          { status: 400 },
+        );
+      }
 
-    const rawDiscogsPrimary = await fetchDiscogsContext({
-      artist: vision.artist,
-      title: vision.title,
-      catalogNumber: vision.catalogNumber,
-      barcode: barcode ?? vision.barcode,
-      discogsKey: env.discogsKey,
-      discogsSecret: env.discogsSecret,
-    });
-    let rawDiscogs = rawDiscogsPrimary;
+      const imageBuffer = new Uint8Array(await image.arrayBuffer());
+      console.info("[analyze] Request received", {
+        hasPrice: typeof price === "number",
+        hasCondition: Boolean(condition),
+        hasBarcode: Boolean(barcode),
+        hasRequestLlmKey: Boolean(llmApiKey),
+        hasIdentifiedPayload: Boolean(identified),
+        currency,
+        imageSize: image.size,
+        imageType: image.type,
+      });
 
-    // If a client-scanned barcode fails, retry with vision barcode as fallback.
-    if (
-      !rawDiscogs.release &&
-      barcode &&
-      vision.barcode &&
-      vision.barcode !== barcode
-    ) {
-      const visionBarcodeDiscogs = await fetchDiscogsContext({
+      vision = await extractReleaseHintsFromImage({
+        imageBytes: imageBuffer,
+        mimeType: image.type,
+        llmApiKey: effectiveLlmApiKey,
+        llmBaseUrl: env.llmBaseUrl,
+        llmModel: env.llmModel,
+      });
+
+      const rawDiscogsPrimary = await fetchDiscogsContext({
         artist: vision.artist,
         title: vision.title,
         catalogNumber: vision.catalogNumber,
-        barcode: vision.barcode,
+        barcode: barcode ?? vision.barcode,
         discogsKey: env.discogsKey,
         discogsSecret: env.discogsSecret,
       });
-      if (visionBarcodeDiscogs.release) {
-        rawDiscogs = visionBarcodeDiscogs;
+      rawDiscogs = rawDiscogsPrimary;
+
+      if (!rawDiscogs.release && barcode && vision.barcode && vision.barcode !== barcode) {
+        const visionBarcodeDiscogs = await fetchDiscogsContext({
+          artist: vision.artist,
+          title: vision.title,
+          catalogNumber: vision.catalogNumber,
+          barcode: vision.barcode,
+          discogsKey: env.discogsKey,
+          discogsSecret: env.discogsSecret,
+        });
+        if (visionBarcodeDiscogs.release) {
+          rawDiscogs = visionBarcodeDiscogs;
+        }
       }
+
+      if (!rawDiscogs.release && barcode) {
+        const textOnlyDiscogs = await fetchDiscogsContext({
+          artist: vision.artist,
+          title: vision.title,
+          catalogNumber: vision.catalogNumber,
+          barcode: undefined,
+          discogsKey: env.discogsKey,
+          discogsSecret: env.discogsSecret,
+        });
+        if (textOnlyDiscogs.release) {
+          rawDiscogs = textOnlyDiscogs;
+        }
+      }
+
+      spotify =
+        (await fetchSpotifyPreview({
+        artist: rawDiscogs.release?.artist ?? vision.artist,
+        title: rawDiscogs.release?.title ?? vision.title,
+        })) ?? undefined;
     }
 
-    // Last fallback: try text-only lookup in case barcode path is noisy.
-    if (!rawDiscogs.release && barcode) {
-      const textOnlyDiscogs = await fetchDiscogsContext({
-        artist: vision.artist,
-        title: vision.title,
-        catalogNumber: vision.catalogNumber,
-        barcode: undefined,
-        discogsKey: env.discogsKey,
-        discogsSecret: env.discogsSecret,
-      });
-      if (textOnlyDiscogs.release) {
-        rawDiscogs = textOnlyDiscogs;
-      }
+    if (!vision) {
+      throw new Error("Could not build release metadata from this image.");
     }
-
+    if (!rawDiscogs) {
+      throw new Error("Could not load release market data.");
+    }
     const discogs = await convertDiscogsContextToCurrency({
       discogs: rawDiscogs,
       targetCurrency: currency,
     });
+    if (!discogs.release) {
+      return NextResponse.json(
+        {
+          error:
+            discogs.searchNotes ??
+            "Album could not be identified from the photo. Try a clearer image.",
+        },
+        { status: 404 },
+      );
+    }
 
     const evaluation = await evaluateBuyRecommendation({
       askingPrice: price,
@@ -210,10 +248,6 @@ export async function POST(request: NextRequest) {
       llmApiKey: effectiveLlmApiKey,
       llmBaseUrl: env.llmBaseUrl,
       llmModel: env.llmModel,
-    });
-    const spotify = await fetchSpotifyPreview({
-      artist: discogs.release?.artist ?? vision.artist,
-      title: discogs.release?.title ?? vision.title,
     });
 
     return NextResponse.json({
