@@ -1,29 +1,51 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { CaptureStage } from "@/components/vinyl-analyzer/capture-stage";
-import { DetailsStage } from "@/components/vinyl-analyzer/details-stage";
-import { ResultStage } from "@/components/vinyl-analyzer/result-stage";
+import { ChooseReleaseStage } from "@/components/vinyl-analyzer/choose-release-stage";
+import {
+  OverviewStage,
+  type AlbumOverviewPayload,
+} from "@/components/vinyl-analyzer/overview-stage";
 import { useBarcodeCamera } from "@/components/vinyl-analyzer/use-barcode-camera";
 import type { AnalyzeResponse } from "@/components/vinyl-analyzer/types";
+import type { IdentifyReleaseChoice } from "@/lib/artwork-candidates";
 import type { AnalyzeResult, IdentifyResult, SupportedCurrency } from "@/lib/types";
 
 export default function Home() {
-  const [stage, setStage] = useState<"capture" | "details" | "result">("capture");
+  const [stage, setStage] = useState<"capture" | "chooseRelease" | "overview">("capture");
   const [price, setPrice] = useState("");
   const [currency, setCurrency] = useState<SupportedCurrency>("USD");
   const [condition, setCondition] = useState("");
   const [llmApiKey, setLlmApiKey] = useState("");
   const [identified, setIdentified] = useState<IdentifyResult | null>(null);
-  const [result, setResult] = useState<AnalyzeResult | null>(null);
+  const [buyResult, setBuyResult] = useState<AnalyzeResult | null>(null);
+  const [buyError, setBuyError] = useState<string | null>(null);
   const [disclaimer, setDisclaimer] = useState<string>(
-    "Informational only. Not financial advice.",
+    "For your reference only—not financial advice.",
   );
   const [isLoading, setIsLoading] = useState(false);
   const [isIdentifying, setIsIdentifying] = useState(false);
+  const [isResolvingRelease, setIsResolvingRelease] = useState(false);
+  const [manualDiscogsId, setManualDiscogsId] = useState("");
+  const [manualArtist, setManualArtist] = useState("");
+  const [manualTitle, setManualTitle] = useState("");
+  const [spineFile, setSpineFile] = useState<File | null>(null);
+  /** Last front-cover file so users can re-run identify after typing spine/manual—no re-upload. */
+  const [coverFile, setCoverFile] = useState<File | null>(null);
+  const [releaseChoices, setReleaseChoices] = useState<IdentifyReleaseChoice[] | null>(
+    null,
+  );
   const [error, setError] = useState<string | null>(null);
+  const [overviewData, setOverviewData] = useState<AlbumOverviewPayload | null>(null);
+  const [overviewLoading, setOverviewLoading] = useState(false);
+  const [overviewError, setOverviewError] = useState<string | null>(null);
+
   const identifyAlbum = useCallback(async (nextFile: File, barcodeOverride?: string) => {
+    setCoverFile(nextFile);
     setError(null);
+    setBuyError(null);
+    setBuyResult(null);
     setIsIdentifying(true);
     setIdentified(null);
     try {
@@ -31,31 +53,119 @@ export default function Home() {
       identifyData.append("image", nextFile);
       if (barcodeOverride) identifyData.append("barcode", barcodeOverride);
       if (llmApiKey.trim() !== "") identifyData.append("llmApiKey", llmApiKey.trim());
+      if (manualArtist.trim() !== "") identifyData.append("manualArtist", manualArtist.trim());
+      if (manualTitle.trim() !== "") identifyData.append("manualTitle", manualTitle.trim());
+      if (spineFile) identifyData.append("imageSpine", spineFile);
 
       const response = await fetch("/api/identify", {
         method: "POST",
         body: identifyData,
+      });
+      const data = (await response.json()) as
+        | IdentifyResult
+        | { error: string }
+        | {
+            chooseRelease: true;
+            options: IdentifyReleaseChoice[];
+          };
+
+      if (!response.ok) {
+        const message =
+          "error" in data && typeof (data as { error?: string }).error === "string"
+            ? (data as { error: string }).error
+            : "We couldn’t match this photo to a release. Try a clearer shot or add artist and title.";
+        setError(message);
+        setStage("capture");
+        return;
+      }
+
+      if ("chooseRelease" in data && data.chooseRelease && "options" in data) {
+        setReleaseChoices(data.options);
+        setStage("chooseRelease");
+        return;
+      }
+
+      setIdentified(data as IdentifyResult);
+      setStage("overview");
+    } catch {
+      setError("Something went wrong while looking up the record. Try again.");
+      setStage("capture");
+    } finally {
+      setIsIdentifying(false);
+    }
+  }, [llmApiKey, manualArtist, manualTitle, spineFile]);
+
+  const handleSearchAgain = useCallback(() => {
+    if (!coverFile) return;
+    void identifyAlbum(coverFile);
+  }, [coverFile, identifyAlbum]);
+
+  const handleLoadManualRelease = useCallback(async () => {
+    setError(null);
+    setBuyError(null);
+    setBuyResult(null);
+    setIsResolvingRelease(true);
+    try {
+      const formData = new FormData();
+      formData.append("discogsReleaseId", manualDiscogsId.trim());
+      const response = await fetch("/api/resolve-release", {
+        method: "POST",
+        body: formData,
       });
       const data = (await response.json()) as IdentifyResult | { error: string };
       if (!response.ok || "error" in data) {
         const message =
           "error" in data
             ? data.error
-            : "Album could not be identified from the photo.";
+            : "That release couldn’t be opened.";
         setError(message);
-        setStage("capture");
         return;
       }
 
       setIdentified(data);
-      setStage("details");
+      setManualDiscogsId("");
     } catch {
-      setError("Could not identify album from photo. Please try again.");
-      setStage("capture");
+      setError("We couldn’t load that release. Check the number and try again.");
     } finally {
-      setIsIdentifying(false);
+      setIsResolvingRelease(false);
     }
-  }, [llmApiKey]);
+  }, [manualDiscogsId]);
+
+  const handleChooseRelease = useCallback(
+    async (option: IdentifyReleaseChoice) => {
+      setError(null);
+      setBuyError(null);
+      setBuyResult(null);
+      setIsResolvingRelease(true);
+      try {
+        const formData = new FormData();
+        formData.append("discogsReleaseId", String(option.releaseId));
+        if (llmApiKey.trim() !== "") formData.append("llmApiKey", llmApiKey.trim());
+        const response = await fetch("/api/resolve-release", {
+          method: "POST",
+          body: formData,
+        });
+        const payload = (await response.json()) as IdentifyResult | { error: string };
+        if (!response.ok || "error" in payload) {
+          const message =
+            "error" in payload
+              ? payload.error
+              : "That release couldn’t be opened.";
+          setError(message);
+          return;
+        }
+
+        setIdentified(payload);
+        setReleaseChoices(null);
+        setStage("overview");
+      } catch {
+        setError("We couldn’t load that release. Try again.");
+      } finally {
+        setIsResolvingRelease(false);
+      }
+    },
+    [llmApiKey],
+  );
 
   const handlePhotoCaptured = useCallback(
     (file: File, barcode?: string) => {
@@ -65,6 +175,54 @@ export default function Home() {
   );
 
   const camera = useBarcodeCamera({ onPhotoCaptured: handlePhotoCaptured });
+
+  useEffect(() => {
+    if (stage !== "overview" || !identified?.discogs?.release) return;
+
+    const ac = new AbortController();
+    setOverviewLoading(true);
+    setOverviewError(null);
+    setOverviewData(null);
+
+    void (async () => {
+      try {
+        const formData = new FormData();
+        formData.append("identified", JSON.stringify(identified));
+        if (llmApiKey.trim() !== "") formData.append("llmApiKey", llmApiKey.trim());
+
+        const response = await fetch("/api/album-overview", {
+          method: "POST",
+          body: formData,
+          signal: ac.signal,
+        });
+        const data = (await response.json()) as AlbumOverviewPayload & { error?: string };
+        if (!response.ok) {
+          throw new Error(data.error ?? "Extra details couldn’t be loaded.");
+        }
+        setOverviewData({
+          albumReview: data.albumReview,
+          artistNote: data.artistNote,
+          overviewLlmError: data.overviewLlmError,
+          otherReleases: data.otherReleases ?? [],
+        });
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        setOverviewError(err instanceof Error ? err.message : "Extra details couldn’t be loaded.");
+      } finally {
+        if (!ac.signal.aborted) setOverviewLoading(false);
+      }
+    })();
+
+    return () => ac.abort();
+  }, [stage, identified, llmApiKey]);
+
+  const handleSpineFileChange = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      const next = event.target.files?.[0];
+      setSpineFile(next ?? null);
+    },
+    [],
+  );
 
   const handleFileChange = useCallback(
     (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -77,13 +235,13 @@ export default function Home() {
     [camera, identifyAlbum],
   );
 
-  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+  async function handleBuySubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setError(null);
-    setResult(null);
+    setBuyError(null);
+    setBuyResult(null);
 
     if (!identified) {
-      setError("Album needs to be identified before running analysis.");
+      setBuyError("Find and open a release first.");
       return;
     }
 
@@ -104,16 +262,15 @@ export default function Home() {
       const data = (await response.json()) as AnalyzeResponse;
       if (!response.ok || "error" in data) {
         const message =
-          "error" in data ? data.error : "Failed to analyze this listing.";
-        setError(message);
+          "error" in data ? data.error : "We couldn’t finish that check.";
+        setBuyError(message);
         return;
       }
 
-      setResult(data);
+      setBuyResult(data);
       if (data.disclaimer) setDisclaimer(data.disclaimer);
-      setStage("result");
     } catch {
-      setError("Network error while analyzing. Please try again.");
+      setBuyError("Check your connection and try again.");
     } finally {
       setIsLoading(false);
     }
@@ -122,19 +279,29 @@ export default function Home() {
   function resetFlow() {
     camera.resetCameraState();
     setStage("capture");
-    setResult(null);
+    setBuyResult(null);
+    setBuyError(null);
     setError(null);
     setPrice("");
     setCondition("");
     setIdentified(null);
     setLlmApiKey("");
     setCurrency("USD");
+    setManualDiscogsId("");
+    setManualArtist("");
+    setManualTitle("");
+    setSpineFile(null);
+    setCoverFile(null);
+    setReleaseChoices(null);
+    setOverviewData(null);
+    setOverviewError(null);
+    setOverviewLoading(false);
   }
 
   const recommendationColor =
-    result?.evaluation.recommendation === "buy"
+    buyResult?.evaluation.recommendation === "buy"
       ? "text-green-700 bg-green-100"
-      : result?.evaluation.recommendation === "skip"
+      : buyResult?.evaluation.recommendation === "skip"
         ? "text-red-700 bg-red-100"
         : "text-amber-700 bg-amber-100";
 
@@ -143,12 +310,39 @@ export default function Home() {
       <div className="mx-auto w-full max-w-5xl">
         <header className="mb-6">
           <h1 className="text-2xl font-semibold">Should I Buy This Vinyl?</h1>
-          <p className="mt-1 text-sm text-zinc-600">{disclaimer}</p>
+          <p className="mt-2 max-w-2xl text-sm text-zinc-700">
+            Photograph the <strong>barcode</strong> if you can—it’s the fastest way to find the
+            release. No barcode? Use a clear shot of the <strong>front</strong> of the sleeve or
+            jacket.
+          </p>
+          <p className="mt-2 text-xs text-zinc-500">{disclaimer}</p>
         </header>
+
+        {stage === "chooseRelease" && releaseChoices ? (
+          <ChooseReleaseStage
+            options={releaseChoices}
+            isLoading={isResolvingRelease}
+            onChoose={(opt) => void handleChooseRelease(opt)}
+            onBack={() => {
+              setStage("capture");
+              setReleaseChoices(null);
+            }}
+          />
+        ) : null}
 
         {stage === "capture" ? (
           <CaptureStage
+            error={error}
             isIdentifying={isIdentifying}
+            hasStoredCover={coverFile !== null}
+            storedCoverName={coverFile?.name ?? null}
+            onSearchAgain={handleSearchAgain}
+            manualArtist={manualArtist}
+            setManualArtist={setManualArtist}
+            manualTitle={manualTitle}
+            setManualTitle={setManualTitle}
+            spineFile={spineFile}
+            onSpineFileChange={handleSpineFileChange}
             llmApiKey={llmApiKey}
             setLlmApiKey={setLlmApiKey}
             onFileChange={handleFileChange}
@@ -166,10 +360,20 @@ export default function Home() {
           />
         ) : null}
 
-        {stage === "details" ? (
-          <DetailsStage
+        {stage === "overview" ? (
+          <OverviewStage
+            error={error}
             identified={identified}
             detectedBarcode={camera.detectedBarcode}
+            overview={overviewData}
+            overviewLoading={overviewLoading}
+            overviewError={overviewError}
+            manualDiscogsId={manualDiscogsId}
+            setManualDiscogsId={setManualDiscogsId}
+            isResolvingRelease={isResolvingRelease}
+            isIdentifying={isIdentifying}
+            onLoadManualRelease={() => void handleLoadManualRelease()}
+            onResetFlow={resetFlow}
             price={price}
             setPrice={setPrice}
             currency={currency}
@@ -178,25 +382,16 @@ export default function Home() {
             setCondition={setCondition}
             llmApiKey={llmApiKey}
             setLlmApiKey={setLlmApiKey}
-            isLoading={isLoading}
-            isIdentifying={isIdentifying}
-            onResetFlow={resetFlow}
-            onSubmit={handleSubmit}
-          />
-        ) : null}
-
-        {stage === "result" && result ? (
-          <ResultStage
-            result={result}
+            buyResult={buyResult}
+            buyLoading={isLoading}
+            buyError={buyError}
             recommendationColor={recommendationColor}
-            onResetFlow={resetFlow}
+            onBuySubmit={handleBuySubmit}
+            onClearBuyResult={() => {
+              setBuyResult(null);
+              setBuyError(null);
+            }}
           />
-        ) : null}
-
-        {error ? (
-          <p className="mt-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-            {error}
-          </p>
         ) : null}
       </div>
     </main>

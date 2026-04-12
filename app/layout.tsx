@@ -4,7 +4,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "Should I Buy This Vinyl?",
   description:
-    "Upload a vinyl cover and get a Discogs-informed buy recommendation.",
+    "Photograph the barcode or the front of the sleeve, then see prices and a quick take before you buy.",
 };
 
 export default function RootLayout({

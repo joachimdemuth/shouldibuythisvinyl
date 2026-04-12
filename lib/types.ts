@@ -38,6 +38,8 @@ export const SUPPORTED_CURRENCIES: SupportedCurrency[] = [
 export interface VisionHints {
   artist?: string;
   title?: string;
+  /** Release or copyright year if clearly visible on the sleeve. */
+  year?: number;
   catalogNumber?: string;
   barcode?: string;
   confidence: number;
@@ -46,6 +48,8 @@ export interface VisionHints {
 
 export interface DiscogsRelease {
   id: number;
+  /** First credited artist id on the Discogs release (for related releases). */
+  primaryArtistId?: number;
   artist: string;
   title: string;
   year?: number;
@@ -61,6 +65,15 @@ export interface DiscogsRelease {
   communityHave?: number;
 }
 
+/** A release or master listed under a Discogs artist (for “more from this artist”). */
+export interface ArtistReleaseSummary {
+  id: number;
+  title: string;
+  year?: number;
+  thumb?: string;
+  type?: string;
+}
+
 export interface MarketStats {
   low?: number;
   median?: number;
@@ -73,7 +86,7 @@ export interface MarketStats {
 export interface DiscogsContext {
   release?: DiscogsRelease;
   market?: MarketStats;
-  matchMethod?: "barcode" | "text";
+  matchMethod?: "barcode" | "text" | "manual";
   searchNotes?: string;
 }
 

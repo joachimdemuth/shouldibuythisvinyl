@@ -12,9 +12,11 @@ import {
   SUPPORTED_CURRENCIES,
   SupportedCurrency,
 } from "@/lib/types";
-import { extractReleaseHintsFromImage } from "@/lib/vision";
-
-const MAX_FILE_BYTES = 8 * 1024 * 1024;
+import { resolveArtworkInference } from "@/lib/artwork-candidates";
+import {
+  buildMergedVisionFromForm,
+  canSearchDiscogs,
+} from "@/lib/identify-merge";
 
 function isValidCondition(value?: string): value is RecordCondition {
   return Boolean(value && CONDITIONS.includes(value as RecordCondition));
@@ -133,27 +135,13 @@ export async function POST(request: NextRequest) {
 
     let vision = identified?.vision;
     let rawDiscogs = identified?.discogs;
-    let spotify = identified?.spotify;
 
     if (!vision || !rawDiscogs) {
       const image = formData.get("image");
       if (!(image instanceof File)) {
         return NextResponse.json({ error: "Image is required." }, { status: 400 });
       }
-      if (!image.type.startsWith("image/")) {
-        return NextResponse.json(
-          { error: "Uploaded file must be an image." },
-          { status: 400 },
-        );
-      }
-      if (image.size > MAX_FILE_BYTES) {
-        return NextResponse.json(
-          { error: "Image is too large. Max size is 8MB." },
-          { status: 400 },
-        );
-      }
 
-      const imageBuffer = new Uint8Array(await image.arrayBuffer());
       console.info("[analyze] Request received", {
         hasPrice: typeof price === "number",
         hasCondition: Boolean(condition),
@@ -165,13 +153,68 @@ export async function POST(request: NextRequest) {
         imageType: image.type,
       });
 
-      vision = await extractReleaseHintsFromImage({
-        imageBytes: imageBuffer,
-        mimeType: image.type,
-        llmApiKey: effectiveLlmApiKey,
+      const visionCtx = {
+        effectiveLlmApiKey,
         llmBaseUrl: env.llmBaseUrl,
         llmModel: env.llmModel,
-      });
+        llmVisionModel: env.llmVisionModel,
+      };
+
+      let coverBuffer: Uint8Array;
+      let coverMime: string;
+      try {
+        const merged = await buildMergedVisionFromForm(formData, visionCtx);
+        vision = merged.vision;
+        coverBuffer = merged.coverBuffer;
+        coverMime = merged.coverMime;
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : "Invalid analyze request.";
+        return NextResponse.json({ error: message }, { status: 400 });
+      }
+
+      if (!canSearchDiscogs(vision, barcode)) {
+        const resolved = await resolveArtworkInference({
+          vision,
+          coverBuffer,
+          coverMime,
+          ctx: visionCtx,
+          discogsKey: env.discogsKey,
+          discogsSecret: env.discogsSecret,
+        });
+        if (resolved.status === "merged") {
+          vision = resolved.vision;
+        } else if (resolved.status === "choose") {
+          const top = resolved.options[0];
+          vision = {
+            ...vision,
+            artist: top.artist,
+            title: top.title,
+            notes: [
+              vision.notes,
+              `Artwork match: using top of ${resolved.options.length} Discogs-ranked candidates.`,
+            ]
+              .filter(Boolean)
+              .join(" "),
+          };
+        }
+      }
+
+      if (!canSearchDiscogs(vision, barcode)) {
+        return NextResponse.json(
+          {
+            error:
+              "Could not analyze: no artist, album, catalog code, or barcode to search. Add spine/back photo, manual text, barcode—or a distinctive iconic cover.",
+          },
+          { status: 404 },
+        );
+      }
+
+      const matchHints = {
+        artist: vision.artist,
+        title: vision.title,
+        year: vision.year,
+      };
 
       const rawDiscogsPrimary = await fetchDiscogsContext({
         artist: vision.artist,
@@ -180,6 +223,7 @@ export async function POST(request: NextRequest) {
         barcode: barcode ?? vision.barcode,
         discogsKey: env.discogsKey,
         discogsSecret: env.discogsSecret,
+        matchHints,
       });
       rawDiscogs = rawDiscogsPrimary;
 
@@ -191,6 +235,7 @@ export async function POST(request: NextRequest) {
           barcode: vision.barcode,
           discogsKey: env.discogsKey,
           discogsSecret: env.discogsSecret,
+          matchHints,
         });
         if (visionBarcodeDiscogs.release) {
           rawDiscogs = visionBarcodeDiscogs;
@@ -205,17 +250,12 @@ export async function POST(request: NextRequest) {
           barcode: undefined,
           discogsKey: env.discogsKey,
           discogsSecret: env.discogsSecret,
+          matchHints,
         });
         if (textOnlyDiscogs.release) {
           rawDiscogs = textOnlyDiscogs;
         }
       }
-
-      spotify =
-        (await fetchSpotifyPreview({
-        artist: rawDiscogs.release?.artist ?? vision.artist,
-        title: rawDiscogs.release?.title ?? vision.title,
-        })) ?? undefined;
     }
 
     if (!vision) {
@@ -239,6 +279,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const spotifyFresh = await fetchSpotifyPreview({
+      artist: discogs.release.artist,
+      title: discogs.release.title,
+      year: discogs.release.year,
+    });
+    const spotify = spotifyFresh ?? identified?.spotify ?? undefined;
+
     const evaluation = await evaluateBuyRecommendation({
       askingPrice: price,
       currency,
@@ -261,7 +308,7 @@ export async function POST(request: NextRequest) {
       discogs,
       spotify,
       evaluation,
-      disclaimer: "Informational only. Not financial advice.",
+      disclaimer: "For your reference only—not financial advice.",
     });
   } catch (error) {
     const message =

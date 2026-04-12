@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { fetchDiscogsContext } from "@/lib/discogs";
 import { getEnvConfig } from "@/lib/env";
+import { resolveArtworkInference } from "@/lib/artwork-candidates";
+import {
+  buildMergedVisionFromForm,
+  canSearchDiscogs,
+} from "@/lib/identify-merge";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { fetchSpotifyPreview } from "@/lib/spotify";
-import { extractReleaseHintsFromImage } from "@/lib/vision";
-
-const MAX_FILE_BYTES = 8 * 1024 * 1024;
 
 function parseOptionalBarcode(value?: string): string | undefined {
   if (!value || value.trim() === "") return undefined;
@@ -48,22 +50,6 @@ export async function POST(request: NextRequest) {
 
     const env = getEnvConfig();
     const formData = await request.formData();
-    const image = formData.get("image");
-    if (!(image instanceof File)) {
-      return NextResponse.json({ error: "Image is required." }, { status: 400 });
-    }
-    if (!image.type.startsWith("image/")) {
-      return NextResponse.json(
-        { error: "Uploaded file must be an image." },
-        { status: 400 },
-      );
-    }
-    if (image.size > MAX_FILE_BYTES) {
-      return NextResponse.json(
-        { error: "Image is too large. Max size is 8MB." },
-        { status: 400 },
-      );
-    }
 
     const barcodeRaw = formData.get("barcode");
     const llmApiKeyRaw = formData.get("llmApiKey");
@@ -80,14 +66,62 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const imageBuffer = new Uint8Array(await image.arrayBuffer());
-    const vision = await extractReleaseHintsFromImage({
-      imageBytes: imageBuffer,
-      mimeType: image.type,
-      llmApiKey: effectiveLlmApiKey,
+    const visionCtx = {
+      effectiveLlmApiKey,
       llmBaseUrl: env.llmBaseUrl,
       llmModel: env.llmModel,
-    });
+      llmVisionModel: env.llmVisionModel,
+    };
+
+    let vision;
+    let coverBuffer: Uint8Array;
+    let coverMime: string;
+    try {
+      const merged = await buildMergedVisionFromForm(formData, visionCtx);
+      vision = merged.vision;
+      coverBuffer = merged.coverBuffer;
+      coverMime = merged.coverMime;
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Invalid identify request.";
+      return NextResponse.json({ error: message }, { status: 400 });
+    }
+
+    if (!canSearchDiscogs(vision, barcode)) {
+      const resolved = await resolveArtworkInference({
+        vision,
+        coverBuffer,
+        coverMime,
+        ctx: visionCtx,
+        discogsKey: env.discogsKey,
+        discogsSecret: env.discogsSecret,
+      });
+      if (resolved.status === "merged") {
+        vision = resolved.vision;
+      } else if (resolved.status === "choose") {
+        return NextResponse.json({
+          chooseRelease: true,
+          options: resolved.options,
+          vision: resolved.baseVision,
+        });
+      }
+    }
+
+    if (!canSearchDiscogs(vision, barcode)) {
+      return NextResponse.json(
+        {
+          error:
+            "Could not identify this record yet: nothing to search Discogs with. Add a spine/back photo, type artist and album, scan a barcode—or use a very distinctive cover the model may recognize. Generic artwork cannot be matched automatically.",
+        },
+        { status: 404 },
+      );
+    }
+
+    const matchHints = {
+      artist: vision.artist,
+      title: vision.title,
+      year: vision.year,
+    };
 
     const rawDiscogsPrimary = await fetchDiscogsContext({
       artist: vision.artist,
@@ -96,6 +130,7 @@ export async function POST(request: NextRequest) {
       barcode: barcode ?? vision.barcode,
       discogsKey: env.discogsKey,
       discogsSecret: env.discogsSecret,
+      matchHints,
     });
     let discogs = rawDiscogsPrimary;
 
@@ -107,6 +142,7 @@ export async function POST(request: NextRequest) {
         barcode: vision.barcode,
         discogsKey: env.discogsKey,
         discogsSecret: env.discogsSecret,
+        matchHints,
       });
       if (visionBarcodeDiscogs.release) discogs = visionBarcodeDiscogs;
     }
@@ -119,6 +155,7 @@ export async function POST(request: NextRequest) {
         barcode: undefined,
         discogsKey: env.discogsKey,
         discogsSecret: env.discogsSecret,
+        matchHints,
       });
       if (textOnlyDiscogs.release) discogs = textOnlyDiscogs;
     }
@@ -137,6 +174,7 @@ export async function POST(request: NextRequest) {
     const spotify = await fetchSpotifyPreview({
       artist: discogs.release.artist,
       title: discogs.release.title,
+      year: discogs.release.year,
     });
 
     return NextResponse.json({ vision, discogs, spotify });
